@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: pico8-online
+    env: node
+    buildCommand: npm ci
+    startCommand: node server.js
