@@ -18,11 +18,14 @@ wss.on('connection', (ws) => {
 		x: 30 + ((id * 15) % 80),
 		y: 64,
 		color: color,
-		state: 0, // 0: Normal, 1: Flashing, 2: Dead
-		flashTime: 0, // Timestamp when flash ends
-		cooldownTime: 0, // Timestamp when cooldown ends
-		respawnTime: 0, // Timestamp when respawn ends
-		lastTimer: 0 // Tracks visual UI timer to broadcast changes
+		state: 0,
+		flashTime: 0,
+		cooldownTime: 0,
+		respawnTime: 0,
+		lastTimer: 0,
+		sprite: 1, // Chosen sprite (1 to 9)
+		kills: 0, // Scoreboard kills
+		ready: false // Has confirmed character selection
 	};
 
 	ws.playerId = id;
@@ -33,10 +36,18 @@ wss.on('connection', (ws) => {
 		try {
 			const data = JSON.parse(message);
 
-			// Movement updates (ignored if the server knows you are dead)
+			// Select Character Action
+			if (data.type === 'select_sprite' && players[data.id]) {
+				players[data.id].sprite = data.sprite;
+				players[data.id].ready = true;
+				worldDirty = true;
+			}
+
+			// Movement updates
 			if (
 				data.type === 'state' &&
 				players[data.id] &&
+				players[data.id].ready &&
 				players[data.id].state !== 2
 			) {
 				if (players[data.id].x !== data.x || players[data.id].y !== data.y) {
@@ -46,19 +57,19 @@ wss.on('connection', (ws) => {
 				}
 			}
 
-			// Flash action triggered by player
+			// Flash Action
 			if (
 				data.type === 'action' &&
 				data.action === 'flash' &&
-				players[data.id]
+				players[data.id] &&
+				players[data.id].ready
 			) {
 				let p = players[data.id];
 				const now = Date.now();
-				// Only allow flash if normal and cooldown is finished
 				if (p.state === 0 && now > p.cooldownTime) {
 					p.state = 1;
-					p.flashTime = now + 1500; // 1.5 seconds of invincibility/kill power
-					p.cooldownTime = now + 5000; // 5 seconds cooldown
+					p.flashTime = now + 1500;
+					p.cooldownTime = now + 5000;
 					worldDirty = true;
 				}
 			}
@@ -73,31 +84,27 @@ wss.on('connection', (ws) => {
 	});
 });
 
-// SERVER TICK: Logic & Broadcast loop (30fps)
 setInterval(() => {
 	const now = Date.now();
 	let forceDirty = false;
-
 	const pKeys = Object.keys(players);
 
-	// 1. Process Timers & State Changes
+	// Timers & States
 	for (let i = 0; i < pKeys.length; i++) {
 		let p = players[pKeys[i]];
+		if (!p.ready) continue;
 
-		// Stop flashing
 		if (p.state === 1 && now > p.flashTime) {
 			p.state = 0;
 			forceDirty = true;
 		}
-		// Respawn from death
 		if (p.state === 2 && now > p.respawnTime) {
 			p.state = 0;
-			p.x = 30 + ((pKeys[i] * 15) % 80); // Reset to a spawn point
+			p.x = 30 + ((pKeys[i] * 15) % 80);
 			p.y = 64;
 			forceDirty = true;
 		}
 
-		// Check if the visual UI countdown timer (seconds) changed
 		let currentTimer = 0;
 		if (p.state === 2) currentTimer = Math.ceil((p.respawnTime - now) / 1000);
 		else if (now < p.cooldownTime)
@@ -105,25 +112,22 @@ setInterval(() => {
 
 		if (p.lastTimer !== currentTimer) {
 			p.lastTimer = currentTimer;
-			forceDirty = true; // Force broadcast so clients see the clock tick down
+			forceDirty = true;
 		}
 	}
 
-	// 2. Process Collisions (Flashing vs Normal)
+	// Collisions
 	for (let i = 0; i < pKeys.length; i++) {
 		let p1 = players[pKeys[i]];
-		if (p1.state === 1) {
-			// If p1 is deadly
+		if (p1.ready && p1.state === 1) {
 			for (let j = 0; j < pKeys.length; j++) {
 				if (i === j) continue;
 				let p2 = players[pKeys[j]];
-
-				if (p2.state === 0) {
-					// If p2 is vulnerable
-					// Simple 4x4 pixel bounding box collision
-					if (Math.abs(p1.x - p2.x) < 4 && Math.abs(p1.y - p2.y) < 4) {
+				if (p2.ready && p2.state === 0) {
+					if (Math.abs(p1.x - p2.x) < 8 && Math.abs(p1.y - p2.y) < 8) {
 						p2.state = 2; // Kill p2
-						p2.respawnTime = now + 3000; // 3 second respawn
+						p2.respawnTime = now + 3000;
+						p1.kills += 1; // Increment p1 score
 						forceDirty = true;
 					}
 				}
@@ -131,7 +135,7 @@ setInterval(() => {
 		}
 	}
 
-	// 3. Broadcast to all clients
+	// Broadcast State
 	if (worldDirty || forceDirty) {
 		const payload = { type: 'world', players: {} };
 		for (const id in players) {
@@ -141,7 +145,10 @@ setInterval(() => {
 				y: p.y,
 				color: p.color,
 				state: p.state,
-				timer: p.lastTimer
+				timer: p.lastTimer,
+				sprite: p.sprite,
+				kills: p.kills,
+				ready: p.ready
 			};
 		}
 
